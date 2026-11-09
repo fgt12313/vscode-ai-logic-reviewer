@@ -21,6 +21,7 @@ const SKIP_DIRS = new Set([
 const MAX_FILES = 300;            // 最多扫多少个文件
 const MAX_TOTAL_CHARS = 200_000;  // 累计字符上限
 const MAX_SINGLE_FILE_CHARS = 60_000; // 单文件字符上限，超出截断
+const MAX_FILE_BYTES = 10 * 1024 * 1024; // 只跳过超大文件，其余统一按字符截断
 
 interface Budget {
   files: number;
@@ -30,6 +31,20 @@ interface Budget {
 
 function newBudget(): Budget {
   return { files: 0, chars: 0, truncated: false };
+}
+
+/** 绝对路径 → 相对路径（统一用 / 分隔），避免把磁盘路径发给模型 */
+function toRelativePath(baseDir: string, fullPath: string): string {
+  return path.relative(baseDir, fullPath).split(path.sep).join('/');
+}
+
+/** 找到包含该文件的 workspace 根目录，找不到就退回其父目录 */
+function workspaceRootFor(fsPath: string): string {
+  const roots = vscode.workspace.workspaceFolders ?? [];
+  const root = roots.find(
+    (f) => f.uri.scheme === 'file' && fsPath.startsWith(f.uri.fsPath + path.sep)
+  );
+  return root?.uri.fsPath ?? path.dirname(fsPath);
 }
 
 /** 递归扫描一个目录，把符合白名单的源码拼成一段带文件头的文本 */
@@ -72,15 +87,15 @@ function scanDirectory(rootDir: string, budget: Budget): string[] {
 
       try {
         const stat = fs.statSync(fullPath);
-        // 按字节粗筛，UTF-8 中文最多 3 字节，乘 4 留余量
-        if (stat.size > MAX_SINGLE_FILE_CHARS * 4) { continue; }
+        // 只跳过超大文件，避免把几 MB 的产物读进内存；其余统一按字符截断
+        if (stat.size > MAX_FILE_BYTES) { continue; }
 
         let text = fs.readFileSync(fullPath, 'utf-8');
         if (text.length > MAX_SINGLE_FILE_CHARS) {
           text = text.slice(0, MAX_SINGLE_FILE_CHARS) + '\n// ...(文件过长，已截断)';
         }
 
-        const chunk = `// 文件: ${fullPath}\n${text}`;
+        const chunk = `// 文件: ${toRelativePath(rootDir, fullPath)}\n${text}`;
         if (budget.chars + chunk.length > MAX_TOTAL_CHARS) {
           budget.truncated = true;
           return;
@@ -118,7 +133,12 @@ export async function collectFile(): Promise<string | null> {
   if (text.length > MAX_SINGLE_FILE_CHARS) {
     text = text.slice(0, MAX_SINGLE_FILE_CHARS) + '\n// ...(文件过长，已截断)';
   }
-  return `// 文件: ${ed.document.fileName}\n${text}`;
+  const uri = ed.document.uri;
+  const fileName =
+    uri.scheme === 'file'
+      ? toRelativePath(workspaceRootFor(uri.fsPath), uri.fsPath)
+      : uri.toString();
+  return `// 文件: ${fileName}\n${text}`;
 }
 
 /** 2. 当前包：当前文件所在目录（递归子目录）；没有打开文件时用工作区根目录 */
@@ -138,7 +158,7 @@ export async function collectCurrentPackage(dirOverride?: string): Promise<strin
 
   const budget = newBudget();
   const parts = scanDirectory(dir, budget);
-  return buildResult(parts, budget, `当前包（目录）${dir}`);
+  return buildResult(parts, budget, `当前包（目录）${path.basename(dir)}`);
 }
 
 /** 3. 当前项目：整个工作区（所有 workspace 文件夹） */
@@ -160,5 +180,5 @@ export async function collectWorkspace(dirOverride?: string): Promise<string | n
     if (budget.truncated) { break; }
     parts.push(...scanDirectory(root, budget));
   }
-  return buildResult(parts, budget, `整个项目 ${roots.join(', ')}`);
+  return buildResult(parts, budget, `整个项目 ${roots.map((r) => path.basename(r)).join(', ')}`);
 }

@@ -3,7 +3,11 @@
   "displayName": "AI 逻辑审查",
   "description": "基于 DeepSeek 的前端代码逻辑审查工具",
   "version": "0.0.1",
-  "publisher": "AI 逻辑审查",
+  "publisher": "fgt12313",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fgt12313/vscode-ai-logic-reviewer.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
